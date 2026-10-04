@@ -13,27 +13,18 @@
    - 차량마다 한 줄씩 추가 (최대 10대 정도)
    - 주소 끝에 ?c=키 를 붙이면 그 차량 화면이 열립니다
      예) https://내주소/?c=car1
-   - keys: 알림 받을 사람들의 Bark 키 (Bark 앱 첫 화면 주소의
-     https://api.day.app/ 뒤에 붙은 문자열). 여러 명이면 여러 개.
-     { key: "...", critical: false } 로 적으면 그 사람은 무음·집중 모드를
-     뚫지 않고, 집중 모드 설정에 따라 울리거나 조용히 옴.
-     안드로이드 사용자는 { ntfy: "채널이름" } 으로 적고 ntfy 앱에서 그 채널 구독.
-     아이폰·안드로이드를 한 차에 섞어 써도 됨.
+   - 알림 받을 사람(Bark 키 등)은 여기가 아니라 서버 쪽 worker/cars.js 에 있습니다.
+     (페이지 소스에 키가 드러나지 않게 하기 위함. 차량을 추가하면 양쪽에 같은 키 이름으로 추가)
    - active: false 로 바꾸면 카드가 "지금은 연락을 받지 않아요"로 바뀜
      (장난 알림이 계속될 때 끄는 스위치. QR 은 다시 인쇄할 필요 없음)
    ============================================================ */
 const CARS = {
-  car1: { name: "", plate: "36마 4789", keys: [{ key: "LzL7GzX7bioXk9m8tCQJxM", critical: false }], active: true },   // ← key: "" 안에 내 Bark 키 넣기
-  // car2: { name: "엄마 차", plate: "34나 5678", keys: ["엄마_키", "아빠_키"], active: true },
+  car1: { name: "", plate: "36마 4789", active: true },
+  // car2: { name: "엄마 차", plate: "34나 5678", active: true },
 };
 const DEFAULT_CAR = "car1";
-const BARK_SERVER = "https://api.day.app";
-const NTFY_SERVER = "https://ntfy.sh";
-const COOLDOWN_SEC = 60;
-// 급한 요청은 전화벨처럼 반복 전송: REPEAT_EVERY_SEC 초 간격으로 REPEAT_SEC 초 동안
-// (보낸 사람이 페이지를 열어 둔 동안만 계속됨. REPEAT_SEC 를 0 으로 하면 한 번만 보냄)
-const REPEAT_SEC = 0;
-const REPEAT_EVERY_SEC = 3;
+// 알림을 대신 보내주는 서버 (worker 폴더, Cloudflare Worker) 주소
+const WORKER_URL = "https://parking-card.yoonhuiwoo.workers.dev";
 </script>
 <style>
 /* 레이아웃: 앞유리에 꽂힌 주차 카드 한 장. 위는 차량 정보, 아래는 큰 버튼 목록 */
@@ -185,8 +176,8 @@ footer { font-size: 12px; color: var(--muted); text-align: center; }
 <script>
 (function () {
   const params = new URLSearchParams(location.search);
-  const key = params.get("c") || DEFAULT_CAR;
-  const car = CARS[key] || CARS[DEFAULT_CAR];
+  const key = CARS[params.get("c")] ? params.get("c") : DEFAULT_CAR;
+  const car = CARS[key];
 
   const $ = (id) => document.getElementById(id);
   if (car.name) { $("carName").textContent = car.name + " 차주에게 알리기"; document.title = car.name + " · 주차 연락 카드"; }
@@ -197,20 +188,6 @@ footer { font-size: 12px; color: var(--muted); text-align: center; }
     s.textContent = "지금은 이 카드로 연락을 받지 않아요. 급한 일은 관리실에 문의해주세요.";
     return;
   }
-  // 키가 비어 있는 항목은 건너뜀. 하나도 없으면 보낼 곳이 없으므로 안내만 표시
-  const targets = car.keys.filter(e => typeof e === "string" ? e : (e.ntfy || e.key));
-  if (!targets.length) {
-    document.querySelector(".choices").hidden = true;
-    const s = $("status"); s.className = "status err"; s.hidden = false;
-    s.textContent = "아직 알림 받을 사람이 설정되지 않았어요. (index.html 맨 위 CARS 의 key 를 채워주세요)";
-    return;
-  }
-
-  const storeKey = "lastSent:" + key;
-  const getLast = () => { try { return Number(localStorage.getItem(storeKey)) || 0; } catch (e) { return 0; } };
-  const setLast = (t) => { try { localStorage.setItem(storeKey, String(t)); } catch (e) {} };
-  let lastSent = getLast();
-
   const status = $("status");
   function show(kind, title, text) {
     status.className = "status " + kind;
@@ -221,53 +198,22 @@ footer { font-size: 12px; color: var(--muted); text-align: center; }
     status.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
-  function cooldownLeft() { return Math.ceil((lastSent + COOLDOWN_SEC * 1000 - Date.now()) / 1000); }
-
   let busy = false;
   async function send(message, priority, tag) {
     if (busy) return;
-    const left = cooldownLeft();
-    if (left > 0) { show("err", "잠시 후 다시 보내주세요", left + "초 뒤에 다시 보낼 수 있어요. 이미 보낸 알림은 차주에게 전달됐어요."); return; }
     busy = true;
     document.querySelectorAll("button").forEach(b => b.disabled = true);
-    const phone = $("phone").value.trim();
-    const urgent = priority >= 5;
-    const title = (car.plate ? car.plate + " · " : "") + "주차 연락";
-    const text = message + (phone ? "\n회신 연락처: " + phone : "");
     try {
-      // 급한 요청: 무음·방해금지 무시(critical) + 30초간 벨소리 반복(call=1)
-      // 나머지: 집중 모드를 뚫는 timeSensitive
-      const fire = () => Promise.all(targets.map(entry => {
-        // 안드로이드 (ntfy): 급한 요청은 최고 우선순위(5) → 앱의 "계속 울리기" 설정과 연동
-        if (typeof entry === "object" && entry.ntfy) {
-          return fetch(NTFY_SERVER + "/", { method: "POST", mode: "no-cors", body: JSON.stringify({
-            topic: entry.ntfy, title: title, message: text,
-            priority: urgent ? 5 : 4, tags: [urgent ? "rotating_light" : "car"]
-          }) });
-        }
-        const k = typeof entry === "string" ? entry : entry.key;
-        // critical: false 인 사람은 무음·집중 모드를 뚫지 않음 (집중 모드 설정을 따름)
-        const critical = urgent && !(typeof entry === "object" && entry.critical === false);
-        const p = new URLSearchParams({
-          title: title, body: text, group: "주차 연락",
-          level: critical ? "critical" : "timeSensitive",
-          volume: critical ? "10" : "5"
-        });
-        if (urgent) p.set("call", "1");
-        // 응답을 읽지 않는 전송 방식이라 CORS 설정과 무관하게 도착함
-        return fetch(BARK_SERVER + "/" + encodeURIComponent(k), { method: "POST", mode: "no-cors", body: p });
-      }));
-      await fire();
-      lastSent = Date.now(); setLast(lastSent);
-      const done = () => show("ok", "차주에게 알림을 보냈어요", "보통 몇 분 안에 확인합니다. 급하면 관리실에도 함께 알려주세요.");
-      if (urgent && REPEAT_SEC > 0) {
-        const until = lastSent + REPEAT_SEC * 1000;
-        const timer = setInterval(() => {
-          if (Date.now() >= until) { clearInterval(timer); done(); return; }
-          fire().catch(() => {});
-        }, REPEAT_EVERY_SEC * 1000);
-        show("ok", "차주 휴대폰을 울리고 있어요", "약 " + REPEAT_SEC + "초 동안 알림이 계속 갑니다. 그동안 이 화면을 닫지 말아 주세요.");
-      } else done();
+      // 급한 요청(priority 5)은 서버가 전화벨처럼 반복해서 보냄. 이 화면을 닫아도 계속됨
+      const res = await fetch(WORKER_URL + "/send?c=" + encodeURIComponent(key), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: message, phone: $("phone").value.trim(), urgent: priority >= 5 })
+      });
+      const data = await res.json();
+      if (data.wait) show("err", "잠시 후 다시 보내주세요", data.wait + "초 뒤에 다시 보낼 수 있어요. 이미 보낸 알림은 차주에게 전달됐어요.");
+      else if (!data.ok) throw new Error("send failed");
+      else if (data.repeat) show("ok", "차주 휴대폰을 울리고 있어요", "약 " + data.repeat + "초 동안 알림이 계속 갑니다. 이 화면은 닫아도 돼요.");
+      else show("ok", "차주에게 알림을 보냈어요", "보통 몇 분 안에 확인합니다. 급하면 관리실에도 함께 알려주세요.");
     } catch (e) {
       show("err", "알림을 보내지 못했어요", "인터넷 연결을 확인하고 다시 눌러주세요. 계속 안 되면 관리실에 문의해주세요.");
     } finally {
