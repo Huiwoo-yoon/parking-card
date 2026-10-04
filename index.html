@@ -30,6 +30,10 @@ const DEFAULT_CAR = "car1";
 const BARK_SERVER = "https://api.day.app";
 const NTFY_SERVER = "https://ntfy.sh";
 const COOLDOWN_SEC = 60;
+// 급한 요청은 전화벨처럼 반복 전송: REPEAT_EVERY_SEC 초 간격으로 REPEAT_SEC 초 동안
+// (보낸 사람이 페이지를 열어 둔 동안만 계속됨. REPEAT_SEC 를 0 으로 하면 한 번만 보냄)
+const REPEAT_SEC = 60;
+const REPEAT_EVERY_SEC = 3;
 </script>
 <style>
 /* 레이아웃: 앞유리에 꽂힌 주차 카드 한 장. 위는 차량 정보, 아래는 큰 버튼 목록 */
@@ -233,7 +237,7 @@ footer { font-size: 12px; color: var(--muted); text-align: center; }
     try {
       // 급한 요청: 무음·방해금지 무시(critical) + 30초간 벨소리 반복(call=1)
       // 나머지: 집중 모드를 뚫는 timeSensitive
-      await Promise.all(targets.map(entry => {
+      const fire = () => Promise.all(targets.map(entry => {
         // 안드로이드 (ntfy): 급한 요청은 최고 우선순위(5) → 앱의 "계속 울리기" 설정과 연동
         if (typeof entry === "object" && entry.ntfy) {
           return fetch(NTFY_SERVER + "/", { method: "POST", mode: "no-cors", body: JSON.stringify({
@@ -253,8 +257,17 @@ footer { font-size: 12px; color: var(--muted); text-align: center; }
         // 응답을 읽지 않는 전송 방식이라 CORS 설정과 무관하게 도착함
         return fetch(BARK_SERVER + "/" + encodeURIComponent(k), { method: "POST", mode: "no-cors", body: p });
       }));
+      await fire();
       lastSent = Date.now(); setLast(lastSent);
-      show("ok", "차주에게 알림을 보냈어요", "보통 몇 분 안에 확인합니다. 급하면 관리실에도 함께 알려주세요.");
+      const done = () => show("ok", "차주에게 알림을 보냈어요", "보통 몇 분 안에 확인합니다. 급하면 관리실에도 함께 알려주세요.");
+      if (urgent && REPEAT_SEC > 0) {
+        const until = lastSent + REPEAT_SEC * 1000;
+        const timer = setInterval(() => {
+          if (Date.now() >= until) { clearInterval(timer); done(); return; }
+          fire().catch(() => {});
+        }, REPEAT_EVERY_SEC * 1000);
+        show("ok", "차주 휴대폰을 울리고 있어요", "약 " + REPEAT_SEC + "초 동안 알림이 계속 갑니다. 그동안 이 화면을 닫지 말아 주세요.");
+      } else done();
     } catch (e) {
       show("err", "알림을 보내지 못했어요", "인터넷 연결을 확인하고 다시 눌러주세요. 계속 안 되면 관리실에 문의해주세요.");
     } finally {
