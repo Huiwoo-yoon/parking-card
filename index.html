@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>주차 연락 카드</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap">
+<script>
+/* ============================================================
+   설정: 여기만 고치면 됩니다
+   - 차량마다 한 줄씩 추가 (최대 10대 정도)
+   - 주소 끝에 ?c=키 를 붙이면 그 차량 화면이 열립니다
+     예) https://내주소/?c=car1
+   - keys: 알림 받을 사람들의 Bark 키 (Bark 앱 첫 화면 주소의
+     https://api.day.app/ 뒤에 붙은 문자열). 여러 명이면 여러 개.
+     { key: "...", critical: false } 로 적으면 그 사람은 무음·집중 모드를
+     뚫지 않고, 집중 모드 설정에 따라 울리거나 조용히 옴.
+     안드로이드 사용자는 { ntfy: "채널이름" } 으로 적고 ntfy 앱에서 그 채널 구독.
+     아이폰·안드로이드를 한 차에 섞어 써도 됨.
+   - active: false 로 바꾸면 카드가 "지금은 연락을 받지 않아요"로 바뀜
+     (장난 알림이 계속될 때 끄는 스위치. QR 은 다시 인쇄할 필요 없음)
+   ============================================================ */
+const CARS = {
+  car1: { name: "", plate: "36마 4789", keys: [{ key: "", critical: false }], active: true },   // ← key: "" 안에 내 Bark 키 넣기
+  // car2: { name: "엄마 차", plate: "34나 5678", keys: ["엄마_키", "아빠_키"], active: true },
+};
+const DEFAULT_CAR = "car1";
+const BARK_SERVER = "https://api.day.app";
+const NTFY_SERVER = "https://ntfy.sh";
+const COOLDOWN_SEC = 60;
+</script>
+<style>
+/* 레이아웃: 앞유리에 꽂힌 주차 카드 한 장. 위는 차량 정보, 아래는 큰 버튼 목록 */
+:root {
+  --bg: #e9ebee;
+  --card: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5c6470;
+  --line: #d4d8de;
+  --accent: #f2b705;      /* 주차선 노랑 */
+  --accent-ink: #1b1f24;
+  --urgent: #c8321e;
+  --ok: #1f7a4a;
+  --display: "Do Hyeon", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171b; --card: #1d2126; --fg: #eef0f3; --muted: #9aa3ae; --line: #2e343b;
+    --accent: #f5c430; --accent-ink: #14171b; --urgent: #ff6b55; --ok: #4cc488; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171b; --card: #1d2126; --fg: #eef0f3; --muted: #9aa3ae; --line: #2e343b;
+  --accent: #f5c430; --accent-ink: #14171b; --urgent: #ff6b55; --ok: #4cc488; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.55 var(--body);
+  padding-inline: 16px; padding-block: 24px 40px;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 440px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+[hidden] { display: none !important; }
+
+.plate {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 20px; display: flex; flex-direction: column; gap: 6px;
+  position: relative; overflow: hidden;
+}
+.plate::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 8px;
+  background: repeating-linear-gradient(-45deg, var(--accent) 0 14px, var(--accent-ink) 14px 28px);
+}
+.eyebrow { font-size: 13px; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
+.plate h1 { font: 34px/1.15 var(--display); margin: 0; text-wrap: balance; }
+.platenum {
+  align-self: flex-start; font: 22px/1 var(--display); letter-spacing: .04em;
+  border: 2px solid var(--fg); border-radius: 6px; padding: 6px 10px; margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.plate p { margin: 6px 0 0; color: var(--muted); font-size: 15px; }
+
+.choices { display: flex; flex-direction: column; gap: 10px; }
+.choice {
+  width: 100%; text-align: left; cursor: pointer;
+  display: flex; align-items: center; gap: 14px;
+  background: var(--card); color: var(--fg);
+  border: 1.5px solid var(--line); border-radius: 12px;
+  padding: 16px; font: 500 17px/1.3 var(--body);
+}
+.choice small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.choice .mark { flex: none; width: 10px; height: 36px; border-radius: 3px; background: var(--line); }
+.choice.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font: 24px/1.2 var(--display); padding-block: 20px; }
+.choice.primary small { color: var(--accent-ink); opacity: .75; font-family: var(--body); }
+.choice.primary .mark { background: var(--accent-ink); }
+.choice.danger .mark { background: var(--urgent); }
+.choice[aria-pressed="true"] { border-color: var(--fg); box-shadow: 0 0 0 2px var(--fg) inset; }
+.choice:focus-visible, button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.form {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 18px; display: flex; flex-direction: column; gap: 12px;
+}
+.form label { font-size: 14px; font-weight: 700; display: flex; flex-direction: column; gap: 6px; }
+.form label span { font-weight: 400; color: var(--muted); }
+textarea, input[type="tel"] {
+  font: 16px/1.5 var(--body); color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; width: 100%;
+}
+textarea { min-height: 84px; resize: vertical; }
+.send {
+  cursor: pointer; border: 0; border-radius: 10px; padding: 16px;
+  background: var(--fg); color: var(--card); font: 22px/1 var(--display);
+}
+.send:disabled { opacity: .45; cursor: not-allowed; }
+.count { font-size: 12px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+.status { border-radius: 12px; padding: 14px 16px; font-size: 15px; }
+.status.ok { background: color-mix(in srgb, var(--ok) 14%, var(--card)); color: var(--fg); border: 1px solid var(--ok); }
+.status.err { background: color-mix(in srgb, var(--urgent) 12%, var(--card)); color: var(--fg); border: 1px solid var(--urgent); }
+.status strong { display: block; font: 20px/1.3 var(--display); margin-bottom: 2px; }
+
+footer { font-size: 12px; color: var(--muted); text-align: center; }
+@media (prefers-reduced-motion: no-preference) { .choice { transition: transform .08s; } .choice:active { transform: scale(.985); } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="plate" aria-labelledby="carName">
+    <div class="eyebrow">주차 연락 카드</div>
+    <h1 id="carName">차주에게 알리기</h1>
+    <div class="platenum" id="plateNum" hidden></div>
+    <p>버튼을 누르면 차주 휴대폰으로 바로 알림이 갑니다. 전화번호는 서로 공개되지 않아요.</p>
+  </section>
+
+  <section class="choices" aria-label="보낼 메시지 선택">
+    <button class="choice primary" type="button" data-msg="차 좀 빼주세요." data-pri="5" data-tag="rotating_light">
+      <span class="mark" aria-hidden="true"></span>
+      <span>차 좀 빼주세요<small>가장 많이 쓰는 요청 · 바로 전송</small></span>
+    </button>
+    <button class="choice" type="button" data-msg="차 라이트(전조등/실내등)가 켜져 있어요." data-pri="4" data-tag="bulb">
+      <span class="mark" aria-hidden="true"></span>
+      <span>라이트가 켜져 있어요<small>배터리 방전 걱정</small></span>
+    </button>
+    <button class="choice" type="button" data-msg="차 창문(또는 선루프)이 열려 있어요." data-pri="4" data-tag="window">
+      <span class="mark" aria-hidden="true"></span>
+      <span>창문이 열려 있어요</span>
+    </button>
+    <button class="choice danger" type="button" data-msg="차에 접촉·파손 등 문제가 생겼어요. 확인 부탁드려요." data-pri="5" data-tag="warning">
+      <span class="mark" aria-hidden="true"></span>
+      <span>차에 문제가 생겼어요<small>접촉 사고, 파손 등</small></span>
+    </button>
+    <button class="choice" type="button" data-custom="1" aria-pressed="false">
+      <span class="mark" aria-hidden="true"></span>
+      <span>직접 입력하기</span>
+    </button>
+  </section>
+
+  <form class="form" id="form" hidden novalidate>
+    <label for="msg">남길 말
+      <textarea id="msg" maxlength="200" placeholder="예) 10분 안에 출차해야 해서 연락드려요."></textarea>
+    </label>
+    <div class="count"><span id="cnt">0</span> / 200</div>
+    <label for="phone">회신받을 연락처 <span>(선택 · 적으면 차주가 연락드려요)</span>
+      <input id="phone" type="tel" inputmode="tel" maxlength="20" placeholder="010-0000-0000" autocomplete="tel">
+    </label>
+    <button class="send" id="sendBtn" type="submit">보내기</button>
+  </form>
+
+  <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+
+  <footer>장난 알림이 반복되면 이 카드는 비활성화될 수 있어요.</footer>
+</main>
+
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const key = params.get("c") || DEFAULT_CAR;
+  const car = CARS[key] || CARS[DEFAULT_CAR];
+
+  const $ = (id) => document.getElementById(id);
+  if (car.name) { $("carName").textContent = car.name + " 차주에게 알리기"; document.title = car.name + " · 주차 연락 카드"; }
+  if (car.plate) { $("plateNum").textContent = car.plate; $("plateNum").hidden = false; }
+  if (car.active === false) {
+    document.querySelector(".choices").hidden = true;
+    const s = $("status"); s.className = "status err"; s.hidden = false;
+    s.textContent = "지금은 이 카드로 연락을 받지 않아요. 급한 일은 관리실에 문의해주세요.";
+    return;
+  }
+  // 키가 비어 있는 항목은 건너뜀. 하나도 없으면 보낼 곳이 없으므로 안내만 표시
+  const targets = car.keys.filter(e => typeof e === "string" ? e : (e.ntfy || e.key));
+  if (!targets.length) {
+    document.querySelector(".choices").hidden = true;
+    const s = $("status"); s.className = "status err"; s.hidden = false;
+    s.textContent = "아직 알림 받을 사람이 설정되지 않았어요. (index.html 맨 위 CARS 의 key 를 채워주세요)";
+    return;
+  }
+
+  const storeKey = "lastSent:" + key;
+  const getLast = () => { try { return Number(localStorage.getItem(storeKey)) || 0; } catch (e) { return 0; } };
+  const setLast = (t) => { try { localStorage.setItem(storeKey, String(t)); } catch (e) {} };
+  let lastSent = getLast();
+
+  const status = $("status");
+  function show(kind, title, text) {
+    status.className = "status " + kind;
+    status.innerHTML = "";
+    const s = document.createElement("strong"); s.textContent = title;
+    const p = document.createElement("div"); p.textContent = text;
+    status.append(s, p); status.hidden = false;
+    status.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function cooldownLeft() { return Math.ceil((lastSent + COOLDOWN_SEC * 1000 - Date.now()) / 1000); }
+
+  let busy = false;
+  async function send(message, priority, tag) {
+    if (busy) return;
+    const left = cooldownLeft();
+    if (left > 0) { show("err", "잠시 후 다시 보내주세요", left + "초 뒤에 다시 보낼 수 있어요. 이미 보낸 알림은 차주에게 전달됐어요."); return; }
+    busy = true;
+    document.querySelectorAll("button").forEach(b => b.disabled = true);
+    const phone = $("phone").value.trim();
+    const urgent = priority >= 5;
+    const title = (car.plate ? car.plate + " · " : "") + "주차 연락";
+    const text = message + (phone ? "\n회신 연락처: " + phone : "");
+    try {
+      // 급한 요청: 무음·방해금지 무시(critical) + 30초간 벨소리 반복(call=1)
+      // 나머지: 집중 모드를 뚫는 timeSensitive
+      await Promise.all(targets.map(entry => {
+        // 안드로이드 (ntfy): 급한 요청은 최고 우선순위(5) → 앱의 "계속 울리기" 설정과 연동
+        if (typeof entry === "object" && entry.ntfy) {
+          return fetch(NTFY_SERVER + "/", { method: "POST", mode: "no-cors", body: JSON.stringify({
+            topic: entry.ntfy, title: title, message: text,
+            priority: urgent ? 5 : 4, tags: [urgent ? "rotating_light" : "car"]
+          }) });
+        }
+        const k = typeof entry === "string" ? entry : entry.key;
+        // critical: false 인 사람은 무음·집중 모드를 뚫지 않음 (집중 모드 설정을 따름)
+        const critical = urgent && !(typeof entry === "object" && entry.critical === false);
+        const p = new URLSearchParams({
+          title: title, body: text, group: "주차 연락",
+          level: critical ? "critical" : "timeSensitive",
+          volume: critical ? "10" : "5"
+        });
+        if (urgent) p.set("call", "1");
+        // 응답을 읽지 않는 전송 방식이라 CORS 설정과 무관하게 도착함
+        return fetch(BARK_SERVER + "/" + encodeURIComponent(k), { method: "POST", mode: "no-cors", body: p });
+      }));
+      lastSent = Date.now(); setLast(lastSent);
+      show("ok", "차주에게 알림을 보냈어요", "보통 몇 분 안에 확인합니다. 급하면 관리실에도 함께 알려주세요.");
+    } catch (e) {
+      show("err", "알림을 보내지 못했어요", "인터넷 연결을 확인하고 다시 눌러주세요. 계속 안 되면 관리실에 문의해주세요.");
+    } finally {
+      busy = false;
+      document.querySelectorAll("button").forEach(b => b.disabled = false);
+    }
+  }
+
+  document.querySelectorAll(".choice").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.custom) {
+        const open = $("form").hidden;
+        $("form").hidden = !open;
+        btn.setAttribute("aria-pressed", String(open));
+        if (open) $("msg").focus();
+        return;
+      }
+      send(btn.dataset.msg, Number(btn.dataset.pri) || 3, btn.dataset.tag);
+    });
+  });
+
+  $("msg").addEventListener("input", () => { $("cnt").textContent = $("msg").value.length; });
+  $("form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = $("msg").value.trim();
+    if (!text) { show("err", "남길 말을 적어주세요", "한 줄이면 충분해요."); $("msg").focus(); return; }
+    send(text, 4, "speech_balloon");
+  });
+})();
+</script>
+</body>
+</html>
